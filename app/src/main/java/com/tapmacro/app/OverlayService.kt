@@ -1,8 +1,10 @@
 package com.tapmacro.app
 
 import android.app.*
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.PixelFormat
 import android.os.*
 import android.view.*
@@ -33,6 +35,33 @@ class OverlayService : Service() {
     private var speedMultiplier = 1.0f
     private val speedOptions = listOf("1x", "2x", "5x", "Custom")
 
+    // Fail-safe: turning the screen off (power button, timeout, anything) kills
+    // any active recording/playback immediately, so a stuck macro can never
+    // keep tapping unattended once the screen is off.
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                failSafeStop()
+            }
+        }
+    }
+
+    private fun failSafeStop() {
+        val wasRecording = isRecording
+        val wasPlaying = isPlaying
+
+        if (isRecording) {
+            stopRecording()
+        }
+        if (isPlaying) {
+            isPlaying = false
+            handler.removeCallbacksAndMessages(null)
+        }
+        if (wasRecording || wasPlaying) {
+            setStatus("Stopped (screen off)")
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -40,6 +69,7 @@ class OverlayService : Service() {
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         startForegroundNotification()
         addControlBubble()
+        registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
     }
 
     private fun startForegroundNotification() {
@@ -165,6 +195,23 @@ class OverlayService : Service() {
 
     // ---------- Recording ----------
 
+    private var recordingStartTime = 0L
+    private val recordingTicker = object : Runnable {
+        override fun run() {
+            if (!isRecording) return
+            val elapsedMs = SystemClock.uptimeMillis() - recordingStartTime
+            setStatus("Recording: ${formatElapsed(elapsedMs)}")
+            handler.postDelayed(this, 500)
+        }
+    }
+
+    private fun formatElapsed(ms: Long): String {
+        val totalSeconds = ms / 1000
+        val minutes = totalSeconds / 60
+        val seconds = totalSeconds % 60
+        return String.format("%d:%02d", minutes, seconds)
+    }
+
     private fun startRecording() {
         if (isRecording || isPlaying) return
         if (TapAccessibilityService.instance == null) {
@@ -174,15 +221,24 @@ class OverlayService : Service() {
         recordedEvents.clear()
         isRecording = true
         lastEventTime = SystemClock.uptimeMillis()
+        recordingStartTime = lastEventTime
         addCaptureOverlay()
-        setStatus("Recording... tap on the screen")
+        // Re-add the control bubble so it renders ABOVE the full-screen capture
+        // layer -- otherwise the capture layer swallows taps on Stop/Play/etc.
+        controlView?.let {
+            wm.removeView(it)
+            wm.addView(it, controlParams)
+        }
+        handler.post(recordingTicker)
     }
 
     private fun stopRecording() {
         if (!isRecording) return
         isRecording = false
+        handler.removeCallbacks(recordingTicker)
         removeCaptureOverlay()
-        setStatus("Recorded ${recordedEvents.size} taps")
+        val elapsed = formatElapsed(SystemClock.uptimeMillis() - recordingStartTime)
+        setStatus("Recorded ${recordedEvents.size} taps ($elapsed)")
     }
 
     private fun addCaptureOverlay() {
@@ -219,7 +275,6 @@ class OverlayService : Service() {
                     val x = event.rawX
                     val y = event.rawY
                     recordedEvents.add(TapEvent(x, y, delay, duration))
-                    setStatus("Recording... ${recordedEvents.size} taps")
                     // echo the tap to the app underneath so the user sees it register live
                     TapAccessibilityService.instance?.performTap(x, y, duration)
                 }
@@ -279,6 +334,11 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        try {
+            unregisterReceiver(screenOffReceiver)
+        } catch (e: Exception) {
+            // already unregistered / never registered - safe to ignore
+        }
         removeCaptureOverlay()
         controlView?.let { wm.removeView(it) }
         controlView = null
