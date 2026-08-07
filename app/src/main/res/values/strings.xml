@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Tap Macro</string>
+    <string name="accessibility_service_description">Allows Tap Macro to replay recorded taps as gestures.</string>
+</resources>

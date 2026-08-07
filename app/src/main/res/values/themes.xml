@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.TapMacro" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/purple_500</item>
+    </style>
+</resources>
