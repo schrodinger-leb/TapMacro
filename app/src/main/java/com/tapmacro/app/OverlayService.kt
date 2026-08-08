@@ -31,8 +31,6 @@ class OverlayService : Service() {
     private var isPlaying = false
     private val recordedEvents = mutableListOf<TapEvent>()
     private var lastEventTime = 0L
-    private var isEchoing = false
-    private var echoGeneration = 0
 
     private var speedMultiplier = 1.0f
 
@@ -278,7 +276,7 @@ class OverlayService : Service() {
         override fun run() {
             if (!isRecording) return
             val elapsedMs = SystemClock.uptimeMillis() - recordingStartTime
-            setStatus("Recording ${formatElapsed(elapsedMs)}")
+            setStatus("Recording ${formatElapsed(elapsedMs)} \u00b7 ${recordedEvents.size} taps")
             handler.postDelayed(this, 250)
         }
     }
@@ -291,8 +289,6 @@ class OverlayService : Service() {
         }
         recordedEvents.clear()
         isRecording = true
-        isEchoing = false
-        echoGeneration++ // invalidate any leftover pending callbacks from a past session
         lastEventTime = SystemClock.uptimeMillis()
         recordingStartTime = lastEventTime
         addCaptureOverlay()
@@ -312,8 +308,6 @@ class OverlayService : Service() {
     private fun stopRecording() {
         if (!isRecording) return
         isRecording = false
-        echoGeneration++ // invalidate any in-flight echo callbacks/timeouts
-        isEchoing = false
         handler.removeCallbacks(recordingTicker)
         removeCaptureOverlay()
         val elapsed = formatElapsed(SystemClock.uptimeMillis() - recordingStartTime)
@@ -335,15 +329,6 @@ class OverlayService : Service() {
         val view = View(this)
         view.setOnTouchListener { _, event ->
             if (!isRecording) return@setOnTouchListener false
-            // Hard block on ANY touch while an echo gesture is in flight --
-            // this is a code-level guard, not a timing guess, so it can't
-            // race with how fast the OS actually applies our touch-through
-            // flag. Without this, the tail of our own echoed tap could sneak
-            // back into our own window and get recorded as a second,
-            // duplicate tap.
-            if (isEchoing) {
-                return@setOnTouchListener true
-            }
             when (event.action) {
                 MotionEvent.ACTION_UP -> {
                     // Use the MotionEvent's own timestamps (same clock as
@@ -359,43 +344,16 @@ class OverlayService : Service() {
                     val x = event.rawX
                     val y = event.rawY
                     recordedEvents.add(TapEvent(x, y, delay, duration))
-
-                    // To actually show the tap landing on the app underneath, we
-                    // briefly make our own capture window transparent to touch
-                    // before echoing the tap -- otherwise our own invisible
-                    // window is what's on top and it just intercepts its own
-                    // echo. We restore normal capture once the echo completes.
-                    isEchoing = true
-                    pauseCaptureOverlay()
-                    val myGeneration = ++echoGeneration
-                    val service = TapAccessibilityService.instance
-                    if (service != null) {
-                        // Short, fixed echo duration for live feedback -- we
-                        // don't need to replicate your exact hold time here
-                        // (that happens for real during Play), and a long
-                        // echo just adds visible lag before you see anything.
-                        val echoDuration = 50L
-                        service.performTap(x, y, echoDuration) {
-                            if (myGeneration == echoGeneration) {
-                                resumeCaptureOverlay()
-                                handler.postDelayed({
-                                    if (myGeneration == echoGeneration) isEchoing = false
-                                }, 40L)
-                            }
-                        }
-                        // Safety net: if the gesture callback never fires for
-                        // any reason, don't let recording freeze forever --
-                        // force-resume after a short timeout.
-                        handler.postDelayed({
-                            if (myGeneration == echoGeneration && isEchoing) {
-                                resumeCaptureOverlay()
-                                isEchoing = false
-                            }
-                        }, 500L)
-                    } else {
-                        resumeCaptureOverlay()
-                        isEchoing = false
-                    }
+                    // Instant, deterministic confirmation of what was just
+                    // recorded -- a numbered marker at the tap location. We
+                    // deliberately don't try to echo the tap into the real
+                    // app anymore: that required briefly consuming, then
+                    // replaying, every touch, which is exactly what caused
+                    // the freezing and the unreliable double-registering.
+                    // This marker approach can't race or get stuck, because
+                    // there's no window state to pause/resume at all.
+                    showTapMarker(x, y, recordedEvents.size)
+                    setStatus("Recording ${formatElapsed(SystemClock.uptimeMillis() - recordingStartTime)} \u00b7 ${recordedEvents.size} taps")
                 }
             }
             true
@@ -405,30 +363,38 @@ class OverlayService : Service() {
         wm.addView(view, params)
     }
 
-    /** Makes the capture window transparent to touch, letting the echoed tap
-     *  reach the real app underneath, without the expense/flakiness of fully
-     *  removing and re-adding the window on every single tap. */
-    private fun pauseCaptureOverlay() {
-        val v = captureView ?: return
-        val p = captureParams ?: return
-        if (p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE == 0) {
-            p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            try {
-                wm.updateViewLayout(v, p)
-            } catch (e: Exception) { /* ignore - window may be mid-transition */ }
+    /** Instant numbered marker shown at a recorded tap's location -- deterministic
+     *  confirmation with no window-state juggling to race or get stuck on. */
+    private fun showTapMarker(x: Float, y: Float, tapNumber: Int) {
+        val size = 100
+        val marker = TextView(this)
+        marker.text = tapNumber.toString()
+        marker.setTextColor(android.graphics.Color.WHITE)
+        marker.textSize = 16f
+        marker.gravity = Gravity.CENTER
+        marker.background = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            setColor(0xCCE53935.toInt())
         }
-    }
+        val markerParams = WindowManager.LayoutParams(
+            size, size,
+            overlayDialogType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        )
+        markerParams.gravity = Gravity.TOP or Gravity.START
+        markerParams.x = (x - size / 2f).toInt()
+        markerParams.y = (y - size / 2f).toInt()
 
-    /** Restores normal touch interception on the capture window. */
-    private fun resumeCaptureOverlay() {
-        if (!isRecording) return
-        val v = captureView ?: return
-        val p = captureParams ?: return
-        if (p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE != 0) {
-            p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-            try {
-                wm.updateViewLayout(v, p)
-            } catch (e: Exception) { /* ignore - window may be mid-transition */ }
+        try {
+            wm.addView(marker, markerParams)
+            marker.animate().alpha(0f).setDuration(500).setStartDelay(300).withEndAction {
+                try { wm.removeView(marker) } catch (e: Exception) { /* already gone */ }
+            }.start()
+        } catch (e: Exception) {
+            // marker is purely cosmetic - never let it crash recording
         }
     }
 
