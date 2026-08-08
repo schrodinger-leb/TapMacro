@@ -299,12 +299,12 @@ class OverlayService : Service() {
                     val x = event.rawX
                     val y = event.rawY
                     recordedEvents.add(TapEvent(x, y, delay, duration))
-                    // To actually show the tap landing on the app underneath,
-                    // we briefly remove our own capture window before echoing
-                    // the tap -- otherwise our own invisible window is what's
-                    // on top and it just intercepts its own echo, which is why
-                    // nothing appeared to happen live before. We put the
-                    // capture window back once the echo gesture completes.
+                    // To actually show the tap landing on the app underneath, we
+                    // briefly make our own capture window transparent to touch
+                    // before echoing the tap -- otherwise our own invisible
+                    // window is what's on top and it just intercepts its own
+                    // echo, which is why nothing appeared to happen live
+                    // before. We restore normal capture once the echo completes.
                     pauseCaptureOverlay()
                     val service = TapAccessibilityService.instance
                     if (service != null) {
@@ -323,22 +323,30 @@ class OverlayService : Service() {
         wm.addView(view, params)
     }
 
-    /** Removes the capture window without forgetting it, so we can add it right back. */
+    /** Makes the capture window transparent to touch, letting the echoed tap
+     *  reach the real app underneath, without the expense/flakiness of fully
+     *  removing and re-adding the window on every single tap. */
     private fun pauseCaptureOverlay() {
-        captureView?.let {
-            try { wm.removeView(it) } catch (e: Exception) { /* already detached - ignore */ }
+        val v = captureView ?: return
+        val p = captureParams ?: return
+        if (p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE == 0) {
+            p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            try {
+                wm.updateViewLayout(v, p)
+            } catch (e: Exception) { /* ignore - window may be mid-transition */ }
         }
     }
 
-    /** Re-adds the capture window after a pause, but only if still recording. */
+    /** Restores normal touch interception on the capture window. */
     private fun resumeCaptureOverlay() {
         if (!isRecording) return
         val v = captureView ?: return
         val p = captureParams ?: return
-        try {
-            wm.addView(v, p)
-        } catch (e: Exception) {
-            // already attached - ignore
+        if (p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE != 0) {
+            p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            try {
+                wm.updateViewLayout(v, p)
+            } catch (e: Exception) { /* ignore - window may be mid-transition */ }
         }
     }
 
