@@ -31,7 +31,7 @@ class OverlayService : Service() {
     private var isPlaying = false
     private val recordedEvents = mutableListOf<TapEvent>()
     private var lastEventTime = 0L
-    private var ignoreTouchesUntil = 0L
+    private var isEchoing = false
 
     private var speedMultiplier = 1.0f
     private val speedOptions = listOf("1x", "2x", "5x", "Custom")
@@ -238,6 +238,7 @@ class OverlayService : Service() {
         }
         recordedEvents.clear()
         isRecording = true
+        isEchoing = false
         lastEventTime = SystemClock.uptimeMillis()
         recordingStartTime = lastEventTime
         addCaptureOverlay()
@@ -284,18 +285,18 @@ class OverlayService : Service() {
         val view = View(this)
         view.setOnTouchListener { _, event ->
             if (!isRecording) return@setOnTouchListener false
+            // Hard block on ANY touch while an echo gesture is in flight --
+            // this is a code-level guard, not a timing guess, so it can't
+            // race with how fast the OS actually applies our touch-through
+            // flag. The previous version only started ignoring touches AFTER
+            // the echo finished, which left the riskiest moment -- while the
+            // echo itself is being dispatched -- completely unprotected, and
+            // that's what was causing one real tap to get recorded twice.
+            if (isEchoing) {
+                return@setOnTouchListener true
+            }
             when (event.action) {
                 MotionEvent.ACTION_UP -> {
-                    // Ignore anything arriving in the short window right after
-                    // we resume capture from echoing a tap -- this is almost
-                    // always the tail of our own synthetic echo gesture
-                    // bleeding back into our own window, not a new real tap.
-                    // Without this, a single physical tap could get recorded
-                    // twice and play back as a rapid double/triple-tap.
-                    if (SystemClock.uptimeMillis() < ignoreTouchesUntil) {
-                        return@setOnTouchListener true
-                    }
-
                     // Use the MotionEvent's own timestamps (same clock as
                     // SystemClock.uptimeMillis) rather than re-measuring with
                     // our own calls, and measure the gap from the previous
@@ -316,6 +317,7 @@ class OverlayService : Service() {
                     // window is what's on top and it just intercepts its own
                     // echo, which is why nothing appeared to happen live
                     // before. We restore normal capture once the echo completes.
+                    isEchoing = true
                     pauseCaptureOverlay()
                     val service = TapAccessibilityService.instance
                     if (service != null) {
@@ -324,17 +326,18 @@ class OverlayService : Service() {
                         // (that happens for real during Play), and echoing
                         // with the full hold time just adds visible lag before
                         // you see anything happen.
-                        val echoDuration = 60L
+                        val echoDuration = 50L
                         service.performTap(x, y, echoDuration) {
-                            // Give the synthetic gesture's own touch stream a
-                            // moment to fully settle before listening again.
-                            handler.postDelayed({
-                                ignoreTouchesUntil = SystemClock.uptimeMillis() + 150L
-                                resumeCaptureOverlay()
-                            }, 40L)
+                            resumeCaptureOverlay()
+                            // Small safety margin in case the touch-through
+                            // flag takes a moment to actually apply -- the
+                            // isEchoing check above is what actually prevents
+                            // duplicates, this just covers that edge further.
+                            handler.postDelayed({ isEchoing = false }, 40L)
                         }
                     } else {
                         resumeCaptureOverlay()
+                        isEchoing = false
                     }
                 }
             }
