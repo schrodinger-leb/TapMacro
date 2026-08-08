@@ -356,6 +356,7 @@ class OverlayService : Service() {
             captureView?.let { wm.removeView(it) }
         } catch (e: Exception) {
             // view may already be detached (e.g. after a crash/restart) - safe to ignore
+        }
         captureView = null
         captureParams = null
     }
