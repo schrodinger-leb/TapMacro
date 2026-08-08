@@ -299,14 +299,21 @@ class OverlayService : Service() {
                     val x = event.rawX
                     val y = event.rawY
                     recordedEvents.add(TapEvent(x, y, delay, duration))
-                    // Show a brief visual marker at the tap location so you get
-                    // feedback while recording. We deliberately do NOT try to
-                    // replay the tap into the app underneath here -- our own
-                    // capture window sits on top and would just intercept its
-                    // own echoed gesture, which is why nothing appeared to
-                    // happen live before. The real tap plays back for real on
-                    // Play, once this capture window is gone.
-                    showTapMarker(x, y)
+                    // To actually show the tap landing on the app underneath,
+                    // we briefly remove our own capture window before echoing
+                    // the tap -- otherwise our own invisible window is what's
+                    // on top and it just intercepts its own echo, which is why
+                    // nothing appeared to happen live before. We put the
+                    // capture window back once the echo gesture completes.
+                    pauseCaptureOverlay()
+                    val service = TapAccessibilityService.instance
+                    if (service != null) {
+                        service.performTap(x, y, duration) {
+                            resumeCaptureOverlay()
+                        }
+                    } else {
+                        resumeCaptureOverlay()
+                    }
                 }
             }
             true
@@ -314,6 +321,25 @@ class OverlayService : Service() {
         captureView = view
         captureParams = params
         wm.addView(view, params)
+    }
+
+    /** Removes the capture window without forgetting it, so we can add it right back. */
+    private fun pauseCaptureOverlay() {
+        captureView?.let {
+            try { wm.removeView(it) } catch (e: Exception) { /* already detached - ignore */ }
+        }
+    }
+
+    /** Re-adds the capture window after a pause, but only if still recording. */
+    private fun resumeCaptureOverlay() {
+        if (!isRecording) return
+        val v = captureView ?: return
+        val p = captureParams ?: return
+        try {
+            wm.addView(v, p)
+        } catch (e: Exception) {
+            // already attached - ignore
+        }
     }
 
     /** Purely cosmetic feedback dot shown at a recorded tap's location. */
