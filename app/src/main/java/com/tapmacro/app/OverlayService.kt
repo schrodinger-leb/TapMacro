@@ -49,7 +49,14 @@ class OverlayService : Service() {
     private fun failSafeStop() {
         val wasRecording = isRecording
         val wasPlaying = isPlaying
+        cancelRecordingAndPlayback()
+        if (wasRecording || wasPlaying) {
+            setStatus("Stopped (screen off)")
+        }
+    }
 
+    /** Cancels whichever of recording/playback is active, without changing status text. */
+    private fun cancelRecordingAndPlayback() {
         if (isRecording) {
             stopRecording()
         }
@@ -57,8 +64,18 @@ class OverlayService : Service() {
             isPlaying = false
             handler.removeCallbacksAndMessages(null)
         }
-        if (wasRecording || wasPlaying) {
-            setStatus("Stopped (screen off)")
+    }
+
+    /** Stop button: cancels recording if recording, or cancels playback if playing. */
+    private fun stopButtonPressed() {
+        if (isRecording) {
+            stopRecording()
+            return
+        }
+        if (isPlaying) {
+            isPlaying = false
+            handler.removeCallbacksAndMessages(null)
+            setStatus("Playback stopped")
         }
     }
 
@@ -157,7 +174,7 @@ class OverlayService : Service() {
         }
 
         view.findViewById<Button>(R.id.btnRecord).setOnClickListener { startRecording() }
-        view.findViewById<Button>(R.id.btnStop).setOnClickListener { stopRecording() }
+        view.findViewById<Button>(R.id.btnStop).setOnClickListener { stopButtonPressed() }
         view.findViewById<Button>(R.id.btnPlay).setOnClickListener { playRecording() }
         view.findViewById<Button>(R.id.btnSave).setOnClickListener { saveRecording() }
         view.findViewById<Button>(R.id.btnClose).setOnClickListener { stopSelf() }
@@ -226,8 +243,12 @@ class OverlayService : Service() {
         // Re-add the control bubble so it renders ABOVE the full-screen capture
         // layer -- otherwise the capture layer swallows taps on Stop/Play/etc.
         controlView?.let {
-            wm.removeView(it)
-            wm.addView(it, controlParams)
+            try {
+                wm.removeView(it)
+            } catch (e: Exception) { /* not attached - ignore */ }
+            try {
+                wm.addView(it, controlParams)
+            } catch (e: Exception) { /* already attached - ignore */ }
         }
         handler.post(recordingTicker)
     }
@@ -263,20 +284,29 @@ class OverlayService : Service() {
         view.setOnTouchListener { _, event ->
             if (!isRecording) return@setOnTouchListener false
             when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    view.setTag(event.eventTime) // remember down time
-                }
                 MotionEvent.ACTION_UP -> {
-                    val downTime = view.getTag() as? Long ?: event.eventTime
-                    val duration = (event.eventTime - downTime).coerceAtLeast(20L)
-                    val now = SystemClock.uptimeMillis()
-                    val delay = (now - lastEventTime).coerceAtLeast(0L)
-                    lastEventTime = now
+                    // Use the MotionEvent's own timestamps (same clock as
+                    // SystemClock.uptimeMillis) rather than re-measuring with
+                    // our own calls, and measure the gap from the previous
+                    // tap's release to THIS tap's press -- not to this tap's
+                    // release, which was accidentally folding each tap's
+                    // hold-duration into the delay and causing drift.
+                    val downTime = event.downTime
+                    val upTime = event.eventTime
+                    val duration = (upTime - downTime).coerceAtLeast(20L)
+                    val delay = (downTime - lastEventTime).coerceAtLeast(0L)
+                    lastEventTime = upTime
                     val x = event.rawX
                     val y = event.rawY
                     recordedEvents.add(TapEvent(x, y, delay, duration))
-                    // echo the tap to the app underneath so the user sees it register live
-                    TapAccessibilityService.instance?.performTap(x, y, duration)
+                    // Show a brief visual marker at the tap location so you get
+                    // feedback while recording. We deliberately do NOT try to
+                    // replay the tap into the app underneath here -- our own
+                    // capture window sits on top and would just intercept its
+                    // own echoed gesture, which is why nothing appeared to
+                    // happen live before. The real tap plays back for real on
+                    // Play, once this capture window is gone.
+                    showTapMarker(x, y)
                 }
             }
             true
@@ -286,8 +316,46 @@ class OverlayService : Service() {
         wm.addView(view, params)
     }
 
+    /** Purely cosmetic feedback dot shown at a recorded tap's location. */
+    private fun showTapMarker(x: Float, y: Float) {
+        val size = 90
+        val marker = View(this)
+        marker.background = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            setColor(0x99FF5252.toInt())
+        }
+        val overlayType =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                WindowManager.LayoutParams.TYPE_PHONE
+        val markerParams = WindowManager.LayoutParams(
+            size, size,
+            overlayType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        )
+        markerParams.gravity = Gravity.TOP or Gravity.START
+        markerParams.x = (x - size / 2f).toInt()
+        markerParams.y = (y - size / 2f).toInt()
+
+        try {
+            wm.addView(marker, markerParams)
+            marker.animate().alpha(0f).setDuration(350).withEndAction {
+                try { wm.removeView(marker) } catch (e: Exception) { /* already gone */ }
+            }.start()
+        } catch (e: Exception) {
+            // marker is purely cosmetic - never let it crash recording
+        }
+    }
+
     private fun removeCaptureOverlay() {
-        captureView?.let { wm.removeView(it) }
+        try {
+            captureView?.let { wm.removeView(it) }
+        } catch (e: Exception) {
+            // view may already be detached (e.g. after a crash/restart) - safe to ignore
         captureView = null
         captureParams = null
     }
@@ -340,7 +408,9 @@ class OverlayService : Service() {
             // already unregistered / never registered - safe to ignore
         }
         removeCaptureOverlay()
-        controlView?.let { wm.removeView(it) }
+        controlView?.let {
+            try { wm.removeView(it) } catch (e: Exception) { /* already detached - ignore */ }
+        }
         controlView = null
     }
 }
