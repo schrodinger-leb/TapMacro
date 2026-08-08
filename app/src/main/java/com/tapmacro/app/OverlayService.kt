@@ -34,6 +34,11 @@ class OverlayService : Service() {
 
     private var speedMultiplier = 1.0f
 
+    private enum class RepeatMode { NONE, CONTINUOUS, COUNT }
+    private var repeatMode = RepeatMode.NONE
+    private var repeatTarget = 1
+    private var currentLoop = 1
+
     // Fail-safe: turning the screen off (power button, timeout, anything) kills
     // any active recording/playback immediately, so a stuck macro can never
     // keep tapping unattended once the screen is off.
@@ -171,8 +176,14 @@ class OverlayService : Service() {
     // ---------- More menu: Speed / Save / Open / Close ----------
 
     private fun showMoreMenu() {
+        val repeatLabel = when (repeatMode) {
+            RepeatMode.NONE -> "off"
+            RepeatMode.CONTINUOUS -> "continuous"
+            RepeatMode.COUNT -> "$repeatTarget times"
+        }
         val items = arrayOf(
             "Speed (currently ${speedMultiplier}x)",
+            "Repeat (currently $repeatLabel)",
             "Save recording",
             "Open saved macro",
             "Close controller"
@@ -182,11 +193,50 @@ class OverlayService : Service() {
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> promptSpeedMenu()
-                    1 -> saveRecording()
-                    2 -> showOpenMenu()
-                    3 -> stopSelf()
+                    1 -> promptRepeatMenu()
+                    2 -> saveRecording()
+                    3 -> showOpenMenu()
+                    4 -> stopSelf()
                 }
             }
+            .create()
+        dialog.window?.setType(overlayDialogType())
+        dialog.show()
+    }
+
+    private fun promptRepeatMenu() {
+        val options = arrayOf("Off (play once)", "Repeat continuously", "Repeat a number of times")
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Repeat")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> { repeatMode = RepeatMode.NONE; setStatus("Repeat: off") }
+                    1 -> { repeatMode = RepeatMode.CONTINUOUS; setStatus("Repeat: continuous") }
+                    2 -> promptRepeatCount()
+                }
+            }
+            .create()
+        dialog.window?.setType(overlayDialogType())
+        dialog.show()
+    }
+
+    private fun promptRepeatCount() {
+        val editText = EditText(this)
+        editText.hint = "e.g. 10"
+        editText.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Repeat how many times?")
+            .setView(editText)
+            .setPositiveButton("OK") { _, _ ->
+                val n = editText.text.toString().toIntOrNull()
+                if (n != null && n > 0) {
+                    repeatMode = RepeatMode.COUNT
+                    repeatTarget = n
+                    setStatus("Repeat: $n times")
+                }
+            }
+            .setNegativeButton("Cancel", null)
             .create()
         dialog.window?.setType(overlayDialogType())
         dialog.show()
@@ -415,7 +465,12 @@ class OverlayService : Service() {
         override fun run() {
             if (!isPlaying) return
             val elapsedMs = SystemClock.uptimeMillis() - playbackStartTime
-            setStatus("Playing ${formatElapsed(elapsedMs)}")
+            val loopInfo = when (repeatMode) {
+                RepeatMode.NONE -> ""
+                RepeatMode.CONTINUOUS -> " \u00b7 loop $currentLoop"
+                RepeatMode.COUNT -> " \u00b7 loop $currentLoop/$repeatTarget"
+            }
+            setStatus("Playing ${formatElapsed(elapsedMs)}$loopInfo")
             handler.postDelayed(this, 250)
         }
     }
@@ -423,6 +478,7 @@ class OverlayService : Service() {
     private fun playRecording() {
         if (isRecording || isPlaying || recordedEvents.isEmpty()) return
         isPlaying = true
+        currentLoop = 1
         playbackStartTime = SystemClock.uptimeMillis()
         handler.post(playbackTicker)
         playFrom(0)
@@ -430,10 +486,21 @@ class OverlayService : Service() {
 
     private fun playFrom(index: Int) {
         if (index >= recordedEvents.size) {
+            val shouldRepeat = isPlaying && when (repeatMode) {
+                RepeatMode.NONE -> false
+                RepeatMode.CONTINUOUS -> true
+                RepeatMode.COUNT -> currentLoop < repeatTarget
+            }
+            if (shouldRepeat) {
+                currentLoop++
+                playFrom(0)
+                return
+            }
             isPlaying = false
             handler.removeCallbacks(playbackTicker)
             val elapsed = formatElapsed(SystemClock.uptimeMillis() - playbackStartTime)
-            setStatus("Done ($elapsed)")
+            val loopSuffix = if (repeatMode != RepeatMode.NONE) " \u00b7 $currentLoop loop(s)" else ""
+            setStatus("Done ($elapsed)$loopSuffix")
             return
         }
         val ev = recordedEvents[index]
