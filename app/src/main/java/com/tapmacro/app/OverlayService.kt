@@ -31,6 +31,7 @@ class OverlayService : Service() {
     private var isPlaying = false
     private val recordedEvents = mutableListOf<TapEvent>()
     private var lastEventTime = 0L
+    private var ignoreTouchesUntil = 0L
 
     private var speedMultiplier = 1.0f
     private val speedOptions = listOf("1x", "2x", "5x", "Custom")
@@ -93,13 +94,13 @@ class OverlayService : Service() {
         val channelId = "tapmacro_channel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                channelId, "Tap Macro Controller", NotificationManager.IMPORTANCE_MIN
+                channelId, "DaehunTask Controller", NotificationManager.IMPORTANCE_MIN
             )
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                 .createNotificationChannel(channel)
         }
         val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Tap Macro running")
+            .setContentTitle("DaehunTask running")
             .setSmallIcon(android.R.drawable.ic_menu_recent_history)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
@@ -285,6 +286,16 @@ class OverlayService : Service() {
             if (!isRecording) return@setOnTouchListener false
             when (event.action) {
                 MotionEvent.ACTION_UP -> {
+                    // Ignore anything arriving in the short window right after
+                    // we resume capture from echoing a tap -- this is almost
+                    // always the tail of our own synthetic echo gesture
+                    // bleeding back into our own window, not a new real tap.
+                    // Without this, a single physical tap could get recorded
+                    // twice and play back as a rapid double/triple-tap.
+                    if (SystemClock.uptimeMillis() < ignoreTouchesUntil) {
+                        return@setOnTouchListener true
+                    }
+
                     // Use the MotionEvent's own timestamps (same clock as
                     // SystemClock.uptimeMillis) rather than re-measuring with
                     // our own calls, and measure the gap from the previous
@@ -308,8 +319,19 @@ class OverlayService : Service() {
                     pauseCaptureOverlay()
                     val service = TapAccessibilityService.instance
                     if (service != null) {
-                        service.performTap(x, y, duration) {
-                            resumeCaptureOverlay()
+                        // Use a short, fixed echo duration for live feedback --
+                        // we don't need to replicate your exact hold time here
+                        // (that happens for real during Play), and echoing
+                        // with the full hold time just adds visible lag before
+                        // you see anything happen.
+                        val echoDuration = 60L
+                        service.performTap(x, y, echoDuration) {
+                            // Give the synthetic gesture's own touch stream a
+                            // moment to fully settle before listening again.
+                            handler.postDelayed({
+                                ignoreTouchesUntil = SystemClock.uptimeMillis() + 150L
+                                resumeCaptureOverlay()
+                            }, 40L)
                         }
                     } else {
                         resumeCaptureOverlay()

@@ -10,7 +10,7 @@
         android:id="@+id/dragHandle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="⠿ Tap Macro"
+        android:text="⠿ DaehunTask"
         android:textColor="@color/white"
         android:padding="4dp" />
 

@@ -16,7 +16,7 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnAccessibility).setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            Toast.makeText(this, "Find 'Tap Macro' in the list and enable it", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Find 'DaehunTask' in the list and enable it", Toast.LENGTH_LONG).show()
         }
 
         findViewById<Button>(R.id.btnOverlay).setOnClickListener {
