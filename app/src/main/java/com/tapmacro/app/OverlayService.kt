@@ -24,6 +24,7 @@ class OverlayService : Service() {
     private var captureParams: WindowManager.LayoutParams? = null
 
     private var statusText: TextView? = null
+    private var isMinimized = false
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -31,10 +32,13 @@ class OverlayService : Service() {
     private var isPlaying = false
     private val recordedEvents = mutableListOf<TapEvent>()
     private var lastEventTime = 0L
-    private var ignoreTouchesUntil = 0L
 
     private var speedMultiplier = 1.0f
-    private val speedOptions = listOf("1x", "2x", "5x", "Custom")
+
+    private enum class RepeatMode { NONE, CONTINUOUS, COUNT }
+    private var repeatMode = RepeatMode.NONE
+    private var repeatTarget = 1
+    private var currentLoop = 1
 
     // Fail-safe: turning the screen off (power button, timeout, anything) kills
     // any active recording/playback immediately, so a stuck macro can never
@@ -135,8 +139,8 @@ class OverlayService : Service() {
 
         statusText = view.findViewById(R.id.statusText)
 
-        // drag to move
-        val dragHandle = view.findViewById<TextView>(R.id.dragHandle)
+        // drag the white bar to move the controller
+        val dragHandle = view.findViewById<View>(R.id.dragHandle)
         dragHandle.setOnTouchListener(object : View.OnTouchListener {
             var startX = 0
             var startY = 0
@@ -158,27 +162,117 @@ class OverlayService : Service() {
             }
         })
 
-        // speed spinner
-        val spinner = view.findViewById<Spinner>(R.id.spinnerSpeed)
-        spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, speedOptions)
-        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                when (speedOptions[pos]) {
-                    "1x" -> speedMultiplier = 1.0f
-                    "2x" -> speedMultiplier = 2.0f
-                    "5x" -> speedMultiplier = 5.0f
-                    "Custom" -> promptCustomSpeed()
-                }
-                setStatus("Speed: ${speedMultiplier}x")
-            }
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
-        }
-
         view.findViewById<Button>(R.id.btnRecord).setOnClickListener { startRecording() }
         view.findViewById<Button>(R.id.btnStop).setOnClickListener { stopButtonPressed() }
         view.findViewById<Button>(R.id.btnPlay).setOnClickListener { playRecording() }
-        view.findViewById<Button>(R.id.btnSave).setOnClickListener { saveRecording() }
-        view.findViewById<Button>(R.id.btnClose).setOnClickListener { stopSelf() }
+        view.findViewById<Button>(R.id.btnMore).setOnClickListener { showMoreMenu() }
+
+        val buttonsRow = view.findViewById<View>(R.id.buttonsRow)
+        val statusView = view.findViewById<View>(R.id.statusText)
+        val minimizeButton = view.findViewById<Button>(R.id.btnMinimize)
+        minimizeButton.setOnClickListener {
+            isMinimized = !isMinimized
+            buttonsRow.visibility = if (isMinimized) View.GONE else View.VISIBLE
+            statusView.visibility = if (isMinimized) View.GONE else View.VISIBLE
+            // Arrow flips direction to show which way it'll act next: pointing
+            // left to collapse, pointing right to expand back out.
+            minimizeButton.text = if (isMinimized) "\u25B6" else "\u25C0"
+            controlParams?.let {
+                try { wm.updateViewLayout(view, it) } catch (e: Exception) { /* ignore */ }
+            }
+        }
+    }
+
+    private fun overlayDialogType(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else
+            WindowManager.LayoutParams.TYPE_PHONE
+
+    // ---------- More menu: Speed / Save / Open / Close ----------
+
+    private fun showMoreMenu() {
+        val repeatLabel = when (repeatMode) {
+            RepeatMode.NONE -> "off"
+            RepeatMode.CONTINUOUS -> "continuous"
+            RepeatMode.COUNT -> "$repeatTarget times"
+        }
+        val items = arrayOf(
+            "Speed (currently ${speedMultiplier}x)",
+            "Repeat (currently $repeatLabel)",
+            "Save recording",
+            "Open saved macro",
+            "Close controller"
+        )
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("More")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> promptSpeedMenu()
+                    1 -> promptRepeatMenu()
+                    2 -> saveRecording()
+                    3 -> showOpenMenu()
+                    4 -> stopSelf()
+                }
+            }
+            .create()
+        dialog.window?.setType(overlayDialogType())
+        dialog.show()
+    }
+
+    private fun promptRepeatMenu() {
+        val options = arrayOf("Off (play once)", "Repeat continuously", "Repeat a number of times")
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Repeat")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> { repeatMode = RepeatMode.NONE; setStatus("Repeat: off") }
+                    1 -> { repeatMode = RepeatMode.CONTINUOUS; setStatus("Repeat: continuous") }
+                    2 -> promptRepeatCount()
+                }
+            }
+            .create()
+        dialog.window?.setType(overlayDialogType())
+        dialog.show()
+    }
+
+    private fun promptRepeatCount() {
+        val editText = EditText(this)
+        editText.hint = "e.g. 10"
+        editText.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Repeat how many times?")
+            .setView(editText)
+            .setPositiveButton("OK") { _, _ ->
+                val n = editText.text.toString().toIntOrNull()
+                if (n != null && n > 0) {
+                    repeatMode = RepeatMode.COUNT
+                    repeatTarget = n
+                    setStatus("Repeat: $n times")
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .create()
+        dialog.window?.setType(overlayDialogType())
+        dialog.show()
+    }
+
+    private fun promptSpeedMenu() {
+        val options = arrayOf("1x", "2x", "5x", "Custom")
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Playback speed")
+            .setItems(options) { _, which ->
+                when (options[which]) {
+                    "1x" -> { speedMultiplier = 1.0f; setStatus("Speed: 1x") }
+                    "2x" -> { speedMultiplier = 2.0f; setStatus("Speed: 2x") }
+                    "5x" -> { speedMultiplier = 5.0f; setStatus("Speed: 5x") }
+                    "Custom" -> promptCustomSpeed()
+                }
+            }
+            .create()
+        dialog.window?.setType(overlayDialogType())
+        dialog.show()
     }
 
     private fun promptCustomSpeed() {
@@ -198,17 +292,47 @@ class OverlayService : Service() {
             .setNegativeButton("Cancel", null)
             .create()
 
-        dialog.window?.setType(
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                WindowManager.LayoutParams.TYPE_PHONE
-        )
+        dialog.window?.setType(overlayDialogType())
+        dialog.show()
+    }
+
+    private fun showOpenMenu() {
+        val names = MacroStorage.list(this)
+        if (names.isEmpty()) {
+            val dialog = AlertDialog.Builder(this)
+                .setTitle("Open saved macro")
+                .setMessage("No saved macros yet. Record something and use Save first.")
+                .setPositiveButton("OK", null)
+                .create()
+            dialog.window?.setType(overlayDialogType())
+            dialog.show()
+            return
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Open saved macro")
+            .setItems(names.toTypedArray()) { _, which ->
+                val name = names[which]
+                val loaded = MacroStorage.load(this, name)
+                recordedEvents.clear()
+                recordedEvents.addAll(loaded)
+                setStatus("Loaded $name (${loaded.size} taps)")
+            }
+            .create()
+        dialog.window?.setType(overlayDialogType())
         dialog.show()
     }
 
     private fun setStatus(text: String) {
         handler.post { statusText?.text = text }
+    }
+
+    /** Formats elapsed time as H:M:S with no zero-padding, e.g. "0:1:19". */
+    private fun formatElapsed(ms: Long): String {
+        val totalSeconds = ms / 1000
+        val hours = totalSeconds / 3600
+        val minutes = (totalSeconds % 3600) / 60
+        val seconds = totalSeconds % 60
+        return "$hours:$minutes:$seconds"
     }
 
     // ---------- Recording ----------
@@ -218,16 +342,9 @@ class OverlayService : Service() {
         override fun run() {
             if (!isRecording) return
             val elapsedMs = SystemClock.uptimeMillis() - recordingStartTime
-            setStatus("Recording: ${formatElapsed(elapsedMs)}")
-            handler.postDelayed(this, 500)
+            setStatus("Recording ${formatElapsed(elapsedMs)} \u00b7 ${recordedEvents.size} taps")
+            handler.postDelayed(this, 250)
         }
-    }
-
-    private fun formatElapsed(ms: Long): String {
-        val totalSeconds = ms / 1000
-        val minutes = totalSeconds / 60
-        val seconds = totalSeconds % 60
-        return String.format("%d:%02d", minutes, seconds)
     }
 
     private fun startRecording() {
@@ -265,16 +382,10 @@ class OverlayService : Service() {
 
     private fun addCaptureOverlay() {
         if (captureView != null) return
-        val overlayType =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                WindowManager.LayoutParams.TYPE_PHONE
-
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
-            overlayType,
+            overlayDialogType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
@@ -286,22 +397,11 @@ class OverlayService : Service() {
             if (!isRecording) return@setOnTouchListener false
             when (event.action) {
                 MotionEvent.ACTION_UP -> {
-                    // Ignore anything arriving in the short window right after
-                    // we resume capture from echoing a tap -- this is almost
-                    // always the tail of our own synthetic echo gesture
-                    // bleeding back into our own window, not a new real tap.
-                    // Without this, a single physical tap could get recorded
-                    // twice and play back as a rapid double/triple-tap.
-                    if (SystemClock.uptimeMillis() < ignoreTouchesUntil) {
-                        return@setOnTouchListener true
-                    }
-
                     // Use the MotionEvent's own timestamps (same clock as
-                    // SystemClock.uptimeMillis) rather than re-measuring with
-                    // our own calls, and measure the gap from the previous
-                    // tap's release to THIS tap's press -- not to this tap's
-                    // release, which was accidentally folding each tap's
-                    // hold-duration into the delay and causing drift.
+                    // SystemClock.uptimeMillis) and measure the gap from the
+                    // previous tap's release to THIS tap's press -- not to
+                    // this tap's own release, which would fold each tap's
+                    // hold-duration into the delay and cause drift.
                     val downTime = event.downTime
                     val upTime = event.eventTime
                     val duration = (upTime - downTime).coerceAtLeast(20L)
@@ -310,32 +410,16 @@ class OverlayService : Service() {
                     val x = event.rawX
                     val y = event.rawY
                     recordedEvents.add(TapEvent(x, y, delay, duration))
-                    // To actually show the tap landing on the app underneath, we
-                    // briefly make our own capture window transparent to touch
-                    // before echoing the tap -- otherwise our own invisible
-                    // window is what's on top and it just intercepts its own
-                    // echo, which is why nothing appeared to happen live
-                    // before. We restore normal capture once the echo completes.
-                    pauseCaptureOverlay()
-                    val service = TapAccessibilityService.instance
-                    if (service != null) {
-                        // Use a short, fixed echo duration for live feedback --
-                        // we don't need to replicate your exact hold time here
-                        // (that happens for real during Play), and echoing
-                        // with the full hold time just adds visible lag before
-                        // you see anything happen.
-                        val echoDuration = 60L
-                        service.performTap(x, y, echoDuration) {
-                            // Give the synthetic gesture's own touch stream a
-                            // moment to fully settle before listening again.
-                            handler.postDelayed({
-                                ignoreTouchesUntil = SystemClock.uptimeMillis() + 150L
-                                resumeCaptureOverlay()
-                            }, 40L)
-                        }
-                    } else {
-                        resumeCaptureOverlay()
-                    }
+                    // Instant, deterministic confirmation of what was just
+                    // recorded -- a numbered marker at the tap location. We
+                    // deliberately don't try to echo the tap into the real
+                    // app anymore: that required briefly consuming, then
+                    // replaying, every touch, which is exactly what caused
+                    // the freezing and the unreliable double-registering.
+                    // This marker approach can't race or get stuck, because
+                    // there's no window state to pause/resume at all.
+                    showTapMarker(x, y, recordedEvents.size)
+                    setStatus("Recording ${formatElapsed(SystemClock.uptimeMillis() - recordingStartTime)} \u00b7 ${recordedEvents.size} taps")
                 }
             }
             true
@@ -345,49 +429,22 @@ class OverlayService : Service() {
         wm.addView(view, params)
     }
 
-    /** Makes the capture window transparent to touch, letting the echoed tap
-     *  reach the real app underneath, without the expense/flakiness of fully
-     *  removing and re-adding the window on every single tap. */
-    private fun pauseCaptureOverlay() {
-        val v = captureView ?: return
-        val p = captureParams ?: return
-        if (p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE == 0) {
-            p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            try {
-                wm.updateViewLayout(v, p)
-            } catch (e: Exception) { /* ignore - window may be mid-transition */ }
-        }
-    }
-
-    /** Restores normal touch interception on the capture window. */
-    private fun resumeCaptureOverlay() {
-        if (!isRecording) return
-        val v = captureView ?: return
-        val p = captureParams ?: return
-        if (p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE != 0) {
-            p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-            try {
-                wm.updateViewLayout(v, p)
-            } catch (e: Exception) { /* ignore - window may be mid-transition */ }
-        }
-    }
-
-    /** Purely cosmetic feedback dot shown at a recorded tap's location. */
-    private fun showTapMarker(x: Float, y: Float) {
-        val size = 90
-        val marker = View(this)
+    /** Instant numbered marker shown at a recorded tap's location -- deterministic
+     *  confirmation with no window-state juggling to race or get stuck on. */
+    private fun showTapMarker(x: Float, y: Float, tapNumber: Int) {
+        val size = 100
+        val marker = TextView(this)
+        marker.text = tapNumber.toString()
+        marker.setTextColor(android.graphics.Color.WHITE)
+        marker.textSize = 16f
+        marker.gravity = Gravity.CENTER
         marker.background = android.graphics.drawable.GradientDrawable().apply {
             shape = android.graphics.drawable.GradientDrawable.OVAL
-            setColor(0x99FF5252.toInt())
+            setColor(0xCCE53935.toInt())
         }
-        val overlayType =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                WindowManager.LayoutParams.TYPE_PHONE
         val markerParams = WindowManager.LayoutParams(
             size, size,
-            overlayType,
+            overlayDialogType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
@@ -399,7 +456,7 @@ class OverlayService : Service() {
 
         try {
             wm.addView(marker, markerParams)
-            marker.animate().alpha(0f).setDuration(350).withEndAction {
+            marker.animate().alpha(0f).setDuration(500).setStartDelay(300).withEndAction {
                 try { wm.removeView(marker) } catch (e: Exception) { /* already gone */ }
             }.start()
         } catch (e: Exception) {
@@ -419,28 +476,62 @@ class OverlayService : Service() {
 
     // ---------- Playback ----------
 
+    private var playbackStartTime = 0L
+    private val playbackTicker = object : Runnable {
+        override fun run() {
+            if (!isPlaying) return
+            val elapsedMs = SystemClock.uptimeMillis() - playbackStartTime
+            val loopInfo = when (repeatMode) {
+                RepeatMode.NONE -> ""
+                RepeatMode.CONTINUOUS -> " \u00b7 loop $currentLoop"
+                RepeatMode.COUNT -> " \u00b7 loop $currentLoop/$repeatTarget"
+            }
+            setStatus("Playing ${formatElapsed(elapsedMs)}$loopInfo")
+            handler.postDelayed(this, 250)
+        }
+    }
+
     private fun playRecording() {
         if (isRecording || isPlaying || recordedEvents.isEmpty()) return
         isPlaying = true
-        setStatus("Playing 0/${recordedEvents.size}")
+        currentLoop = 1
+        playbackStartTime = SystemClock.uptimeMillis()
+        handler.post(playbackTicker)
         playFrom(0)
     }
 
     private fun playFrom(index: Int) {
         if (index >= recordedEvents.size) {
+            val shouldRepeat = isPlaying && when (repeatMode) {
+                RepeatMode.NONE -> false
+                RepeatMode.CONTINUOUS -> true
+                RepeatMode.COUNT -> currentLoop < repeatTarget
+            }
+            if (shouldRepeat) {
+                currentLoop++
+                playFrom(0)
+                return
+            }
             isPlaying = false
-            setStatus("Done")
+            handler.removeCallbacks(playbackTicker)
+            val elapsed = formatElapsed(SystemClock.uptimeMillis() - playbackStartTime)
+            val loopSuffix = if (repeatMode != RepeatMode.NONE) " \u00b7 $currentLoop loop(s)" else ""
+            setStatus("Done ($elapsed)$loopSuffix")
             return
         }
         val ev = recordedEvents[index]
+        // Speed multiplier scales BOTH the gap before this tap AND the tap's
+        // own hold duration, so it actually changes the pace of playback
+        // rather than just the gaps between taps.
         val scaledDelay = (ev.delayMs / speedMultiplier).toLong().coerceAtLeast(0L)
+        val scaledDuration = (ev.durationMs / speedMultiplier).toLong().coerceAtLeast(16L)
         handler.postDelayed({
-            TapAccessibilityService.instance?.performTap(ev.x, ev.y, ev.durationMs) {
-                setStatus("Playing ${index + 1}/${recordedEvents.size}")
+            TapAccessibilityService.instance?.performTap(ev.x, ev.y, scaledDuration) {
                 playFrom(index + 1)
             } ?: run {
                 setStatus("Accessibility service not enabled")
                 isPlaying = false
+                handler.removeCallbacks(playbackTicker)
             }
         }, scaledDelay)
     }
@@ -452,7 +543,10 @@ class OverlayService : Service() {
             setStatus("Nothing to save")
             return
         }
-        val name = "macro_${System.currentTimeMillis()}"
+        val existingCount = MacroStorage.list(this).size
+        val nextNumber = existingCount + 1
+        val dateStr = java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault()).format(java.util.Date())
+        val name = "Macro $nextNumber [$dateStr]"
         MacroStorage.save(this, name, recordedEvents)
         setStatus("Saved as $name")
     }
