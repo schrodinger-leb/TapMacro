@@ -3,20 +3,21 @@
     android:orientation="vertical"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content"
-    android:background="#DD222222">
+    android:background="#DD222222"
+    android:padding="10dp">
 
-    <!-- Full-width white bar: drag this to move the controller -->
-    <View
+    <TextView
         android:id="@+id/dragHandle"
         android:layout_width="match_parent"
-        android:layout_height="26dp"
-        android:background="@android:color/white" />
+        android:layout_height="wrap_content"
+        android:text="⠿ DaehunTask"
+        android:textColor="@color/white"
+        android:padding="4dp" />
 
     <LinearLayout
         android:orientation="horizontal"
         android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:padding="6dp">
+        android:layout_height="wrap_content">
 
         <Button
             android:id="@+id/btnRecord"
@@ -37,22 +38,39 @@
             android:layout_height="wrap_content"
             android:backgroundTint="@color/play_green"
             android:text="Play" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:orientation="horizontal"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp">
+
+        <Spinner
+            android:id="@+id/spinnerSpeed"
+            android:layout_width="100dp"
+            android:layout_height="wrap_content" />
 
         <Button
-            android:id="@+id/btnMore"
+            android:id="@+id/btnSave"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="More" />
+            android:text="Save" />
+
+        <Button
+            android:id="@+id/btnClose"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="✕" />
     </LinearLayout>
 
     <TextView
         android:id="@+id/statusText"
-        android:layout_width="match_parent"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:gravity="center"
         android:textColor="@color/white"
-        android:textSize="12sp"
-        android:paddingBottom="6dp"
+        android:textSize="11sp"
+        android:layout_marginTop="4dp"
         android:text="Idle" />
 
 </LinearLayout>
